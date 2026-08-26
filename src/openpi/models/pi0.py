@@ -12,6 +12,8 @@ from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
+from openpi.cotrain import ot_loss as _ot_loss
+from openpi.training import sharding as _sharding
 
 logger = logging.getLogger("openpi")
 
@@ -61,6 +63,56 @@ def posemb_sincos(
         precision=jax.lax.Precision.HIGHEST,
     )
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
+
+
+def _replicate_for_ot(x):
+    """All-gather batch shards so OT sees the global batch, not the per-GPU slice."""
+    mesh = _sharding._MeshState.active_mesh
+    if mesh is None:
+        return x
+    return jax.lax.with_sharding_constraint(
+        x, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    )
+
+
+def _ot_bridge_egobridge(tok, act80, ot_group, h_id, r_id, bridge: str, model, max_k: int = 16, min_k: int = 4):
+    """DTW-shaped Sinkhorn OT on real human/robot supports (padding masked)."""
+    is_h = ot_group == h_id
+    is_r = ot_group == r_id
+    nh = jnp.sum(is_h.astype(jnp.int32))
+    nr = jnp.sum(is_r.astype(jnp.int32))
+
+    # Matching samples sorted to the front (False sorts after True via 0/1 key)
+    order_h = jnp.argsort(jnp.where(is_h, jnp.int32(0), jnp.int32(1)))
+    order_r = jnp.argsort(jnp.where(is_r, jnp.int32(0), jnp.int32(1)))
+    th = tok[order_h][:max_k]
+    tr = tok[order_r][:max_k]
+    ah80 = act80[order_h][:max_k]
+    ar80 = act80[order_r][:max_k]
+    ah = _ot_loss.gather_xyz_for_bridge(ah80, bridge)
+    ar = _ot_loss.gather_xyz_for_bridge(ar80, bridge)
+    valid_h = jnp.arange(max_k) < nh
+    valid_r = jnp.arange(max_k) < nr
+
+    def _zero(_):
+        return jnp.zeros((), dtype=jnp.float32)
+
+    def _run(_):
+        loss, _info = _ot_loss.bridge_ot_square(
+            th,
+            tr,
+            ah,
+            ar,
+            lambd=model.ot_lambd,
+            dtw_gamma=model.ot_dtw_gamma,
+            blur=model.ot_blur,
+            sinkhorn_iters=model.ot_sinkhorn_iters,
+            valid_h=valid_h,
+            valid_r=valid_r,
+        )
+        return jnp.asarray(loss, dtype=jnp.float32)
+
+    return jax.lax.cond((nh >= min_k) & (nr >= min_k), _run, _zero, None)
 
 
 class Pi0(_model.BaseModel):
@@ -122,6 +174,15 @@ class Pi0(_model.BaseModel):
             )
 
             self.ego_loss_weight = config.ego_loss_weight
+
+            self.ot_enabled = config.ot_enabled
+            self.ot_alpha = config.ot_alpha
+            self.ot_lambd = config.ot_lambd
+            self.ot_dtw_gamma = config.ot_dtw_gamma
+            self.ot_blur = config.ot_blur
+            self.ot_sinkhorn_iters = config.ot_sinkhorn_iters
+            self.ot_min_pairs = config.ot_min_pairs
+            self.ot_max_k = getattr(config, "ot_max_k", 16)
         # =======================================================================================================================
 
         # KI settings (training-only; inference path unchanged). 
@@ -397,6 +458,28 @@ class Pi0(_model.BaseModel):
                 "flow_robot": robot_flow_loss,
                 "flow_ego": ego_flow_loss,
             }
+
+        if getattr(self, "ot_enabled", False):
+            og = observation.ot_group
+            if og is None:
+                og = jnp.zeros((actions.shape[0],), dtype=jnp.int32)
+            # GT actions for Soft-DTW (normalized 80D is fine; EgoBridge also uses batch actions)
+            act80 = jax.lax.stop_gradient(actions)
+            tok = _replicate_for_ot(action_hidden)
+            act80 = _replicate_for_ot(act80)
+            og = _replicate_for_ot(og)
+            max_k = int(getattr(self, "ot_max_k", 16))
+            min_k = int(getattr(self, "ot_min_pairs", 4))
+            min_k = 4 if min_k < 4 else min_k
+            loss_hz = _ot_bridge_egobridge(
+                tok, act80, og, 1, 2, "hz", self, max_k=max_k, min_k=min_k
+            )
+            loss_sz = _ot_bridge_egobridge(
+                tok, act80, og, 3, 4, "sz", self, max_k=max_k, min_k=min_k
+            )
+            losses["ot"] = loss_hz + loss_sz
+            losses["ot_hz"] = loss_hz
+            losses["ot_sz"] = loss_sz
 
         if self.ki_enabled:
             # KI auxiliary CE loss: next-token prediction on FAST tokens using VLM outputs.

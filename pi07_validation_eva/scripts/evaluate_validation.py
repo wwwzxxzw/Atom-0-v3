@@ -34,7 +34,7 @@ RAW_IMAGE_KEYS = {
     "right_wrist_0_rgb": "cam_right_wrist",
 }
 PIPER_DATASET_ID = "piper30"
-PROMPT_PREFIX = "Action Mode: joint. "
+PROMPT_PREFIX = "Embodiment: robot. Action Mode: joint. "
 DEFAULT_TARGET_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHECKPOINT_ROOT = Path(
     "/mnt/workspace/xule/pi07_reproduction/checkpoints/cotrain_all_2ep/"

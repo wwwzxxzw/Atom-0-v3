@@ -139,9 +139,9 @@ class DispatchNormalize(_transforms.DataTransformFn):
     Reuses openpi's `Normalize` math for the looked-up dataset. Pops `dataset_id` so it
     never reaches JAX sharding (strings are not shardable).
 
-    Also emits `domain_mask` (bool): True for EgoVerse (`dataset_id` starts with
-    `egoverse_`), False otherwise. Used only at train time to route flow loss to
-    `ego_action_out_proj` vs `action_out_proj`.
+    Also emits `domain_mask` (bool): True = human → ego head; False = robot head.
+    Human: EgoVerse non-eva (aria/human/mecka/scale/rl2_human) + aligned_*_human_*.
+    Robot: egoverse_eva / egoverse_rl2_eva + aligned_*_robot_* + agibot/droid/piper/robocoin/robomind.
     """
 
     norm_stats_by_dataset: dict
@@ -151,7 +151,24 @@ class DispatchNormalize(_transforms.DataTransformFn):
         ds = data.pop("dataset_id", None)
         if ds is not None:
             ds_name = _decode_str(ds)
-            data["domain_mask"] = np.asarray(ds_name.startswith("egoverse_"), dtype=bool)
+            ROBOT_EGOVERSE_IDS = frozenset({"egoverse_eva", "egoverse_rl2_eva"})
+            is_ego = (
+                (ds_name.startswith("egoverse_") and ds_name not in ROBOT_EGOVERSE_IDS)
+                or (ds_name.startswith("aligned_") and "_human" in ds_name)
+            )
+            data["domain_mask"] = np.asarray(is_ego, dtype=bool)
+            # OT group for AtomAligned bridges
+            if ds_name == "aligned_hangzhou_human_right":
+                ot_g = 1
+            elif ds_name == "aligned_hangzhou_robot_right":
+                ot_g = 2
+            elif ds_name == "aligned_shenzhen_human_bimanual":
+                ot_g = 3
+            elif ds_name == "aligned_shenzhen_robot_bimanual":
+                ot_g = 4
+            else:
+                ot_g = 0
+            data["ot_group"] = np.asarray(ot_g, dtype=np.int32)
             stats = self.norm_stats_by_dataset.get(ds_name)
             if stats:
                 # Stats are computed at NATIVE dim (e.g. 14); but in the train/val pipeline the
@@ -163,6 +180,7 @@ class DispatchNormalize(_transforms.DataTransformFn):
                 data = _transforms.Normalize(stats, use_quantiles=self.use_quantiles)(data)
         else:
             data["domain_mask"] = np.asarray(False, dtype=bool)
+            data["ot_group"] = np.asarray(0, dtype=np.int32)
         return data
 
     @staticmethod

@@ -152,7 +152,10 @@ def audit_mixed_pipeline(datasets) -> dict:
             if isinstance(prompt_prefix, bytes):
                 prompt_prefix = prompt_prefix.decode()
             expected_mode = "eef" if dataset_id.startswith("egoverse_") else "joint"
-            if not prompt_prefix.startswith(f"Action Mode: {expected_mode}."):
+            if not (
+                prompt_prefix.startswith(f"Embodiment: robot. Action Mode: {expected_mode}.")
+                or prompt_prefix.startswith(f"Embodiment: human. Action Mode: {expected_mode}.")
+            ):
                 raise ValueError(f"{dataset_id}: unexpected prompt prefix {prompt_prefix!r}")
             if expected_mode == "eef" and "EEF Frame:" not in prompt_prefix:
                 raise ValueError(f"{dataset_id}: EEF prompt is missing its coordinate frame")

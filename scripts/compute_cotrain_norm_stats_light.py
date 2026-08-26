@@ -151,6 +151,13 @@ def _create_light_dataset(
     if dataset_cfg.restructure_name in cotrain_rlds_dataset.STD_RESTRUCTURE_FNS:
         if dataset_cfg.restructure_name in cotrain_rlds_dataset._EGO_EVA_GRIPPER_FILTER_NAMES:
             dataset = dataset.filter(cotrain_rlds_dataset._egoverse_eva_gripper_fields_finite)
+        if dataset_cfg.episode_task_name_regex is not None:
+            _pat = dataset_cfg.episode_task_name_regex
+            dataset = dataset.filter(
+                lambda traj, p=_pat: tf.strings.regex_full_match(
+                    traj["traj_metadata"]["episode_metadata"]["task_name"][0], p
+                )
+            )
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.traj_map(

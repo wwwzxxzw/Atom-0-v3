@@ -313,6 +313,14 @@ _ALIGNED_PARALLEL_GRIPPER_MAPPING = (
 )
 _ALIGNED_SINGLE_RIGHT_MAPPING = dims(0, RIGHT_EEF_POSITION, 6) + dims(6, RIGHT_GRIPPER, 1)
 
+_ALIGNED_PARALLEL_NO_GRIPPER_MAPPING = (
+    dims(0, LEFT_EEF_POSITION, 3)
+    + dims(3, LEFT_EEF_EULER, 3)
+    + dims(6, RIGHT_EEF_POSITION, 3)
+    + dims(9, RIGHT_EEF_EULER, 3)
+)
+_ALIGNED_SINGLE_RIGHT_NO_GRIPPER_MAPPING = dims(0, RIGHT_EEF_POSITION, 6)
+
 UNIFIED_ACTION_SPECS: dict[str, UnifiedActionSpec] = {
     "agibot": _same(_AGIBOT_MAPPING, delta=slots(LEFT_ARM, 7) + slots(RIGHT_ARM, 7)),
     "droid": _single_right(7, 7),
@@ -323,10 +331,12 @@ UNIFIED_ACTION_SPECS: dict[str, UnifiedActionSpec] = {
     "egoverse_scale": _same(_EGO_MAPPING),
     # 以后单独数据集族 EgoVerse_rl2（不要并进 full 子集）
     "egoverse_rl2_eva": _same(_EGO_EVA_14_MAPPING),
-    "egoverse_rl2_human": _same(_EGO_MAPPING),
-    "aligned_hangzhou_human_right": _same(_ALIGNED_SINGLE_RIGHT_MAPPING),
+    "egoverse_rl2_human": _same(_EGO_MAPPING),  # legacy; mixture 不再使用
+    "egoverse_rl2_indomain": _same(_EGO_MAPPING),
+    "egoverse_rl2_diverse": _same(_EGO_MAPPING),
+    "aligned_hangzhou_human_right": _same(_ALIGNED_SINGLE_RIGHT_NO_GRIPPER_MAPPING),
     "aligned_hangzhou_robot_right": _same(_ALIGNED_SINGLE_RIGHT_MAPPING),
-    "aligned_shenzhen_human_bimanual": _same(_ALIGNED_PARALLEL_GRIPPER_MAPPING),
+    "aligned_shenzhen_human_bimanual": _same(_ALIGNED_PARALLEL_NO_GRIPPER_MAPPING),
     "aligned_shenzhen_robot_bimanual": _same(_ALIGNED_PARALLEL_GRIPPER_MAPPING),
     "piper30": _same(_PIPER_MAPPING, delta=slots(LEFT_ARM, 6) + slots(RIGHT_ARM, 6)),
     "piper2": _same(_PIPER_MAPPING, delta=slots(LEFT_ARM, 6) + slots(RIGHT_ARM, 6)),

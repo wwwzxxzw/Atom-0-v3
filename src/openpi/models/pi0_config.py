@@ -37,6 +37,15 @@ class Pi0Config(_model.BaseModelConfig):
     # ================================================== 新增：Ego 训练配置 ==================================================
     use_ego_action_head: bool = False
     ego_loss_weight: float = 1.0  # Ego 分支损失权重
+    # OT (AtomAligned Soft-DTW + Sinkhorn)
+    ot_enabled: bool = False
+    ot_alpha: float = 0.7
+    ot_lambd: float = 0.5
+    ot_dtw_gamma: float = 0.1
+    ot_blur: float = 0.05
+    ot_sinkhorn_iters: int = 18
+    ot_min_pairs: int = 4
+    ot_max_k: int = 16
     # =======================================================================================================================
 
     # KI (Knowledge Insulation) settings. KI is a training-only mechanism; inference path is unchanged.
@@ -101,6 +110,11 @@ class Pi0Config(_model.BaseModelConfig):
         # ================================================ 新增：Ego 损失权重校验 =================================================
         if self.ego_loss_weight < 0:
             raise ValueError("ego_loss_weight must be >= 0")
+        
+        if self.ot_alpha < 0:
+            raise ValueError("ot_alpha must be >= 0")
+        if self.ot_lambd <= 0:
+            raise ValueError("ot_lambd must be > 0")
         # =======================================================================================================================
 
         for name, value in {
@@ -228,6 +242,7 @@ class Pi0Config(_model.BaseModelConfig):
                 # ========== 新增：双域训练掩码字段 ==========
                 action_mask=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.bool_),
                 domain_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_),
+                ot_group=jax.ShapeDtypeStruct([batch_size], jnp.int32),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

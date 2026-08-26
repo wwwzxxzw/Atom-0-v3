@@ -172,6 +172,35 @@ class CotrainDataConfig(_config.DataConfigFactory):
             if self.unified_action_space
             else _resolve_legacy32_datasets(self.datasets, model_config)
         )
+
+        # Ablation fixed-quota mixture (env-driven; default keeps episode weights).
+        #   MIX_MODE=fixed|episode
+        #   P_OTHER=0.8  LAB_IN_ALIGN=0.3  O_EV_HUMAN=0.02  ALIGN_BY_DURATION=0|1
+        if os.environ.get("MIX_MODE", "episode").lower() == "fixed":
+            from openpi.cotrain.mixture_quota import apply_fixed_quota
+
+            hours_by_uid = {ds.uid: max(float(ds.weight), 0.0) for ds in datasets}
+            datasets = apply_fixed_quota(
+                datasets,
+                p_other=float(os.environ.get("P_OTHER", "0.8")),
+                lab_in_align=float(os.environ.get("LAB_IN_ALIGN", "0.3")),
+                o_ev_human=float(os.environ.get("O_EV_HUMAN", "0.02")),
+                align_by_duration=os.environ.get("ALIGN_BY_DURATION", "0").lower()
+                in ("1", "true", "yes"),
+                hours_by_uid=hours_by_uid,
+            )
+            logger.info(
+                "MIX_MODE=fixed applied: p_other=%s lab_in_align=%s o_ev_human=%s align_by_duration=%s",
+                os.environ.get("P_OTHER", "0.8"),
+                os.environ.get("LAB_IN_ALIGN", "0.3"),
+                os.environ.get("O_EV_HUMAN", "0.02"),
+                os.environ.get("ALIGN_BY_DURATION", "0"),
+            )
+            logger.info(
+                "fixed-quota weights: %s",
+                {ds.uid: round(ds.weight, 6) for ds in datasets},
+            )
+
         if getattr(model_config, "ki_enabled", False):
             raise NotImplementedError("KI FAST-token supervision does not yet support per-dimension action masks.")
 
@@ -296,17 +325,24 @@ _EGOVERSE_FULL_ROOT = f"{_RLDS_ROOT}/EgoVerse_full"
 _EGOVERSE_FULL_TRAIN_EPISODES = 910 + 2_813 + 770 + 39_530 + 16_223
 
 _EGOVERSE_RL2_ROOT = f"{_RLDS_ROOT}/EgoVerse_rl2"
-_EGOVERSE_RL2_TRAIN_EPISODES = 2_831 + 1_387
+# Filtered cup/fold only (task_name regex); used for mixture duration proxy.
+_EGOVERSE_RL2_EVA_EPISODES = 2032
+_EGOVERSE_RL2_ID_EPISODES = 72
+_EGOVERSE_RL2_DIV_EPISODES = 1024
+_EGOVERSE_RL2_TRAIN_EPISODES = (
+    _EGOVERSE_RL2_EVA_EPISODES + _EGOVERSE_RL2_ID_EPISODES + _EGOVERSE_RL2_DIV_EPISODES
+)
 
-_ATOM_ALIGNED_ROOT = f"{_RLDS_ROOT}/AtomAligned_full"
-_ATOM_ALIGNED_TRAIN_EPISODES = 387 + 90 + 656 + 163  # hz_h + hz_r + sz_h + sz_r
+_ATOM_ALIGNED_ROOT = "/mnt/data/RLDS/AtomAligned_full_front_cam"
+_ATOM_ALIGNED_VERSION = "3.0.0"
+_ATOM_ALIGNED_TRAIN_EPISODES = 387 + 90 + 656 + 182
 
 def _make_atom_aligned_dataset(dataset_id: str, *, action_dim: int, weight: float) -> CotrainRLDSDataset:
     return CotrainRLDSDataset(
         name="atom_aligned_rlds",
         dataset_id=dataset_id,
-        version="1.0.0",
-        builder_dir=f"{_ATOM_ALIGNED_ROOT}/{dataset_id}/1.0.0",
+        version=_ATOM_ALIGNED_VERSION,
+        builder_dir=f"{_ATOM_ALIGNED_ROOT}/{dataset_id}/{_ATOM_ALIGNED_VERSION}",
         weight=weight,
         train_split="train",
         val_splits={"seen": "seen_test", "unseen": "unseen_test"},
@@ -317,11 +353,11 @@ def _make_atom_aligned_dataset(dataset_id: str, *, action_dim: int, weight: floa
 _ATOM_ALIGNED_DATA = CotrainDataConfig(
     rlds_data_dir=_ATOM_ALIGNED_ROOT,
     datasets=(
-        # 子集内先按 episode 相对权重；再经 _scale_dataset_weights 并入大混合
-        _make_atom_aligned_dataset("aligned_hangzhou_human_right", action_dim=7, weight=387 / _ATOM_ALIGNED_TRAIN_EPISODES),
+        # human: no gripper (6/12); robot: absolute gripper (7/14)
+        _make_atom_aligned_dataset("aligned_hangzhou_human_right", action_dim=6, weight=387 / _ATOM_ALIGNED_TRAIN_EPISODES),
         _make_atom_aligned_dataset("aligned_hangzhou_robot_right", action_dim=7, weight=90 / _ATOM_ALIGNED_TRAIN_EPISODES),
-        _make_atom_aligned_dataset("aligned_shenzhen_human_bimanual", action_dim=14, weight=656 / _ATOM_ALIGNED_TRAIN_EPISODES),
-        _make_atom_aligned_dataset("aligned_shenzhen_robot_bimanual", action_dim=14, weight=163 / _ATOM_ALIGNED_TRAIN_EPISODES),
+        _make_atom_aligned_dataset("aligned_shenzhen_human_bimanual", action_dim=12, weight=656 / _ATOM_ALIGNED_TRAIN_EPISODES),
+        _make_atom_aligned_dataset("aligned_shenzhen_robot_bimanual", action_dim=14, weight=182 / _ATOM_ALIGNED_TRAIN_EPISODES),
     ),
 )
 
@@ -631,6 +667,12 @@ _EGOVERSE_FULL_DATA = CotrainDataConfig(
     ),
 )
 
+# RL2 keep only cup-on-saucer + fold-clothes; human split by indomain/diverse suffix.
+# Adjust after Step0 histogram if needed.
+_RL2_EVA_TASK_RE = r"^(cup_on_saucer.*|fold_clothes.*)$"
+_RL2_ID_TASK_RE = r"^(fold_clothes_indomain|put cup on saucer indomain)$"
+_RL2_DIV_TASK_RE = r"^(cup_on_saucer|cup_on_saucer_success|cup_on_saucer_static_cam|fold_clothes|fold_clothes_success)$"
+
 _EGOVERSE_RL2_DATA = CotrainDataConfig(
     rlds_data_dir=_EGOVERSE_RL2_ROOT,
     datasets=(
@@ -642,28 +684,45 @@ _EGOVERSE_RL2_DATA = CotrainDataConfig(
                 f"{_EGOVERSE_RL2_ROOT}/eva_bimanual_front_1_left_wrist_right_wrist/"
                 "ego_verse_infidata/1.0.0"
             ),
-            weight=2_831 / _EGOVERSE_RL2_TRAIN_EPISODES,
+            weight=_EGOVERSE_RL2_EVA_EPISODES / _EGOVERSE_RL2_TRAIN_EPISODES,  # MIX_MODE=fixed 时会被 apply_fixed_quota 覆盖
             train_split="train",
             val_splits={"seen": "seen_test", "unseen": "unseen_test"},
             restructure_name="egoverse_rl2_eva",
             action_dim=14,
             delta_action_mask_dims=None,
+            episode_task_name_regex=_RL2_EVA_TASK_RE,
         ),
         CotrainRLDSDataset(
             name="ego_verse_infidata",
-            dataset_id="egoverse_rl2_human",
+            dataset_id="egoverse_rl2_indomain",
             version="1.0.0",
             builder_dir=(
                 f"{_EGOVERSE_RL2_ROOT}/human_bimanual_front_1/"
                 "ego_verse_infidata/1.0.0"
             ),
-            weight=1_387 / _EGOVERSE_RL2_TRAIN_EPISODES,
+            weight=_EGOVERSE_RL2_ID_EPISODES / _EGOVERSE_RL2_TRAIN_EPISODES,
             train_split="train",
             val_splits={"seen": "seen_test", "unseen": "unseen_test"},
-            # human：12D EE，无夹爪 → 与 full human 相同 restructure
             restructure_name="egoverse_full",
             action_dim=12,
             delta_action_mask_dims=None,
+            episode_task_name_regex=_RL2_ID_TASK_RE,
+        ),
+        CotrainRLDSDataset(
+            name="ego_verse_infidata",
+            dataset_id="egoverse_rl2_diverse",
+            version="1.0.0",
+            builder_dir=(
+                f"{_EGOVERSE_RL2_ROOT}/human_bimanual_front_1/"
+                "ego_verse_infidata/1.0.0"
+            ),
+            weight=_EGOVERSE_RL2_DIV_EPISODES / _EGOVERSE_RL2_TRAIN_EPISODES,
+            train_split="train",
+            val_splits={"seen": "seen_test", "unseen": "unseen_test"},
+            restructure_name="egoverse_full",
+            action_dim=12,
+            delta_action_mask_dims=None,
+            episode_task_name_regex=_RL2_DIV_TASK_RE,
         ),
     ),
 )
@@ -1024,7 +1083,7 @@ _FULL_ALL_FIX_DATA = CotrainDataConfig(
 _UNIFIED_PI05_MODEL = pi0_config.Pi0Config(
     pi05=True,
     action_dim=cotrain_action_space.UNIFIED_ACTION_DIM,
-    max_token_len=384,
+    max_token_len=416,
 )
 _LEGACY32_PI05_MODEL = pi0_config.Pi0Config(
     pi05=True,
@@ -1156,6 +1215,17 @@ _REAL_ROBOT_EGO_FIX_PI05 = dataclasses.replace(
     _REAL_ONLY_PI05,
     name="cotrain_real_robot_ego_fix",
     data=_REAL_ROBOT_EGO_FIX_DATA,
+    model=dataclasses.replace(
+        _UNIFIED_PI05_MODEL,
+        use_ego_action_head=True,
+        ego_loss_weight=1.0,
+        ot_enabled=True,
+        ot_alpha=0.7,   # EgoBridge temperature
+        ot_lambd=0.5,
+        ot_dtw_gamma=0.1,
+        ot_blur=0.05,
+        ot_sinkhorn_iters=18,
+        ),
 )
 
 _FULL_ALL_PI05_FULL_NORM = dataclasses.replace(

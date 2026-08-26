@@ -209,6 +209,14 @@ def train_step(
             if "ki_fast" in out:
                 total = total + ki_alpha * jnp.mean(out["ki_fast"])
                 aux["ki_fast_loss"] = jnp.mean(out["ki_fast"])
+            if "ot" in out:
+                ot_alpha = getattr(model, "ot_alpha", 0.0)
+                total = total + ot_alpha * out["ot"]
+                aux["ot_loss"] = out["ot"]
+                if "ot_hz" in out:
+                    aux["ot_hz"] = out["ot_hz"]
+                if "ot_sz" in out:
+                    aux["ot_sz"] = out["ot_sz"]
             return total, aux
         return jnp.mean(out), {}
 
@@ -508,7 +516,9 @@ def main(config: cotrain_config.CotrainTrainConfig):
         batch = next(data_iter)
 
         # Periodic validation (skip step 0, where weights are still the init).
-        if config.eval_interval and step % config.eval_interval == 0 and step > start_step:
+        if config.eval_interval and step > start_step and (
+            step % config.eval_interval == 0 or step == config.num_train_steps - 1
+        ):
             _run_eval(step)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

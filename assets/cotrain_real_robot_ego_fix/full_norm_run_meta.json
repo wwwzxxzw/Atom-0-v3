@@ -1,23 +1,37 @@
 {
   "config_name": "cotrain_real_robot_ego_fix",
-  "output_assets_dir": "/data/weizhongxing/projects/Atom-0/assets/cotrain_real_robot_ego_fix",
-  "dataset_id": "aligned_shenzhen_robot_bimanual",
+  "output_assets_dir": "/mnt/data/weizhongxing/Atom-0-v3/assets/cotrain_real_robot_ego_fix",
+  "dataset_id": "egoverse_rl2_eva,egoverse_eva",
   "skip_dataset_ids": [],
   "copy_from_assets_name": null,
   "datasets": [
     {
       "config_name": "cotrain_real_robot_ego_fix",
-      "dataset_id": "aligned_shenzhen_robot_bimanual",
-      "builder_dir": "/mnt/bos/36dn4h/AtomAligned_full/aligned_shenzhen_robot_bimanual/1.0.0",
+      "dataset_id": "egoverse_eva",
+      "builder_dir": "/mnt/data/RLDS/EgoVerse_full/eva_bimanual_front_1_left_wrist_right_wrist/ego_verse_infidata/1.0.0",
       "split": "train",
       "batch_size": 32,
-      "num_batches": 1021,
-      "num_frames": 32667,
+      "num_batches": 96751,
+      "num_frames": 3096014,
       "estimated_total_batches": null,
-      "train_episodes": 163,
-      "train_bytes": 3822056704,
-      "elapsed_sec": 18.433297395706177,
-      "frames_per_sec": 1772.1734369461972
+      "train_episodes": 2813,
+      "train_bytes": 495006312915,
+      "elapsed_sec": 1088.7754383087158,
+      "frames_per_sec": 2843.5744333186763
+    },
+    {
+      "config_name": "cotrain_real_robot_ego_fix",
+      "dataset_id": "egoverse_rl2_eva",
+      "builder_dir": "/mnt/data/RLDS/EgoVerse_rl2/eva_bimanual_front_1_left_wrist_right_wrist/ego_verse_infidata/1.0.0",
+      "split": "train",
+      "batch_size": 32,
+      "num_batches": 97093,
+      "num_frames": 3106948,
+      "estimated_total_batches": null,
+      "train_episodes": 2831,
+      "train_bytes": 496177410621,
+      "elapsed_sec": 1081.137113571167,
+      "frames_per_sec": 2873.777951935494
     }
   ]
 }

@@ -53,6 +53,10 @@ class CotrainRLDSDataset:
     # label -> TFDS split name. E.g. RoboMIND: {"seen": "seen_test", "unseen": "unseen_test"}.
     val_splits: dict = dataclasses.field(default_factory=_default_val_splits)
     filter_dict_path: str | None = None
+
+    # If set, keep only episodes whose episode_metadata.task_name full-matches this TF regex.
+    episode_task_name_regex: str | None = None  
+
     # Which restructure to use: "standardized" (offline common schema), "robomind" (raw
     # RoboMIND schema, mapped at runtime), or "droid" (raw DROID schema).
     restructure_name: str = "standardized"
@@ -150,7 +154,7 @@ def _droid_restructure(traj, action_space: DroidActionSpace, filter_table):
             "gripper_position": traj["observation"]["gripper_position"],
         },
         "prompt": instruction,
-        "prompt_prefix": tf.fill([traj_len], _action_prompt_prefix("joint")),
+        "prompt_prefix": tf.fill([traj_len], _action_prompt_prefix("joint", embodiment="robot")),
         "step_id": step_id,
         "passes_filter": passes_filter,
     }
@@ -166,11 +170,23 @@ RESTRUCTURE_FNS = {
 _STD_IMAGE_SLOTS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
 
 
-def _action_prompt_prefix(action_mode: str, eef_frame=None):
-    """Build the action-metadata text prepended before the tokenizer's ``Task:`` text."""
+def _action_prompt_prefix(action_mode: str, eef_frame=None, embodiment: str = "robot"):
+    """Build the action-metadata text prepended before the tokenizer's ``Task:`` text.
+
+    Includes a binary Embodiment weak anchor (robot/human), Action Mode (joint/eef),
+    and optional EEF Frame for cartesian datasets.
+    """
     import tensorflow as tf
 
-    prefix = tf.strings.join(["Action Mode: ", tf.convert_to_tensor(action_mode, tf.string), ". "])
+    prefix = tf.strings.join(
+        [
+            "Embodiment: ",
+            tf.convert_to_tensor(embodiment, tf.string),
+            ". Action Mode: ",
+            tf.convert_to_tensor(action_mode, tf.string),
+            ". ",
+        ]
+    )
     if eef_frame is None:
         return prefix
 
@@ -178,10 +194,10 @@ def _action_prompt_prefix(action_mode: str, eef_frame=None):
     return tf.strings.join([prefix, "EEF Frame: ", frame, ". "])
 
 
-def _fill_action_prompt_prefix(n, action_mode: str, eef_frame=None):
+def _fill_action_prompt_prefix(n, action_mode: str, eef_frame=None, embodiment: str = "robot"):
     import tensorflow as tf
 
-    return tf.fill([n], _action_prompt_prefix(action_mode, eef_frame))
+    return tf.fill([n], _action_prompt_prefix(action_mode, eef_frame, embodiment=embodiment))
 
 def _episode_scalar_string(value, *, field_name: str):
     """Collapse a scalar or per-step constant string field to one episode scalar."""
@@ -265,7 +281,7 @@ def _robomind_restructure(traj, dataset_name: str):
             "right_wrist_0_rgb": true_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_name),
     }
 
@@ -297,7 +313,7 @@ def _three_cam_task_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": true_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -336,7 +352,7 @@ def _piper2_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": true_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -368,7 +384,7 @@ def _agibot_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": true_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -397,7 +413,7 @@ def _agibot_restructure(traj, dataset_id: str):
 #             "right_wrist_0_rgb": true_mask,
 #         },
 #         "prompt": traj["prompt"],
-#         "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"]),
+#         "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"], embodiment="robot"),
 #         "dataset_id": tf.fill([n], dataset_id),
 #     }
 
@@ -435,6 +451,11 @@ def _egoverse_eva_restructure(traj, dataset_id: str):
       sample ``action_source_horizon`` points with ``action_stride``,
       then linearly interpolate to ``action_chunk_length`` (typically 30 -> 100).
 
+    Cartesian EE poses in RLDS are robot base / source_pose_frame.
+    Convert L/R to Aria front cam with official Eva.EXTRINSICS (T_cam_base):
+        T_cam = inv(T_cam_base) @ T_base
+    (same as EgoVerse ``base_frame_to_cam_frame``).
+
     Downstream ``map_trajectory_tensorflow`` still scatters 14D into unified 80D.
     """
     import tensorflow as tf
@@ -443,8 +464,89 @@ def _egoverse_eva_restructure(traj, dataset_id: str):
     true_mask = tf.fill([n], True)
     imgs = traj["observation"]["images"]
 
-    cart = traj["actions_cartesian"]  # [T, 100, 12] already baked/interpolated
-    state12 = traj["observation"]["state"]  # [T, 12]
+    cart = tf.cast(traj["actions_cartesian"], tf.float32)  # [T, H, 12]
+    state12 = tf.cast(traj["observation"]["state"], tf.float32)  # [T, 12]
+
+    # Official Eva.EXTRINSICS = T_cam_base (GaTech-RL2/EgoVerse)
+    T_cam_base_L = tf.constant(
+        [
+            [0.01329544, -0.71757193, 0.69635749, -0.04409191],
+            [-0.99959782, -0.02698416, -0.00872107, -0.23221381],
+            [0.02504862, -0.69596148, -0.7176421, 0.57323278],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        tf.float32,
+    )
+    T_cam_base_R = tf.constant(
+        [
+            [-0.04733948, -0.76631195, 0.64072222, -0.01998031],
+            [-0.9983006, 0.05811952, -0.00424732, 0.32539554],
+            [-0.0339837, -0.63983444, -0.76776103, 0.64809634],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        tf.float32,
+    )
+    T_base_cam_L = tf.linalg.inv(T_cam_base_L)
+    T_base_cam_R = tf.linalg.inv(T_cam_base_R)
+
+    def _xyzypr_to_mat(pose):
+        """pose [..., 6] xyz + ypr(ZYX rad) -> [..., 4, 4]."""
+        xyz = pose[..., 0:3]
+        ypr = pose[..., 3:6]
+        cz, sz = tf.cos(ypr[..., 0]), tf.sin(ypr[..., 0])
+        cy, sy = tf.cos(ypr[..., 1]), tf.sin(ypr[..., 1])
+        cx, sx = tf.cos(ypr[..., 2]), tf.sin(ypr[..., 2])
+        r00 = cz * cy
+        r01 = cz * sy * sx - sz * cx
+        r02 = cz * sy * cx + sz * sx
+        r10 = sz * cy
+        r11 = sz * sy * sx + cz * cx
+        r12 = sz * sy * cx - cz * sx
+        r20 = -sy
+        r21 = cy * sx
+        r22 = cy * cx
+        rot = tf.stack(
+            [
+                tf.stack([r00, r01, r02], axis=-1),
+                tf.stack([r10, r11, r12], axis=-1),
+                tf.stack([r20, r21, r22], axis=-1),
+            ],
+            axis=-2,
+        )
+        zeros = tf.zeros_like(xyz[..., :1])
+        ones = tf.ones_like(xyz[..., :1])
+        top = tf.concat([rot, xyz[..., None]], axis=-1)  # [..., 3, 4]
+        row3 = tf.concat([zeros, zeros, zeros, ones], axis=-1)  # [..., 4]
+        return tf.concat([top, row3[..., None, :]], axis=-2)
+
+    def _mat_to_xyzypr(mats):
+        """mats [..., 4, 4] -> [..., 6] xyz + ypr(ZYX rad)."""
+        xyz = mats[..., :3, 3]
+        rot = mats[..., :3, :3]
+        pitch = tf.asin(tf.clip_by_value(-rot[..., 2, 0], -1.0, 1.0))
+        yaw = tf.atan2(rot[..., 1, 0], rot[..., 0, 0])
+        roll = tf.atan2(rot[..., 2, 1], rot[..., 2, 2])
+        return tf.concat([xyz, tf.stack([yaw, pitch, roll], axis=-1)], axis=-1)
+
+    def _base_to_cam(pose_xyzypr, T_base_cam):
+        mats = _xyzypr_to_mat(pose_xyzypr)
+        cam_mats = tf.einsum("ij,...jk->...ik", T_base_cam, mats)
+        return _mat_to_xyzypr(cam_mats)
+
+    state12 = tf.concat(
+        [
+            _base_to_cam(state12[..., 0:6], T_base_cam_L),
+            _base_to_cam(state12[..., 6:12], T_base_cam_R),
+        ],
+        axis=-1,
+    )
+    cart = tf.concat(
+        [
+            _base_to_cam(cart[..., 0:6], T_base_cam_L),
+            _base_to_cam(cart[..., 6:12], T_base_cam_R),
+        ],
+        axis=-1,
+    )
 
     # Match InfiData / EgoVerse conversion metadata (constant per episode).
     def _scalar_or_default(key, default):
@@ -508,7 +610,7 @@ def _egoverse_eva_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": true_mask,
         },
         "prompt": traj["prompt"],
-        "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"]),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "eef", "cam_frame", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -540,7 +642,7 @@ def _egoverse_mecka_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": false_mask,
         },
         "prompt": traj["prompt"],
-        "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"]),
+        "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"], embodiment="human"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -585,23 +687,25 @@ def _egoverse_full_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": right_mask,
         },
         "prompt": traj["prompt"],
-        "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"]),
+        "prompt_prefix": _action_prompt_prefix("eef", traj["cartesian_frame"], embodiment="human"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
 def _aligned_parallel_gripper_restructure(traj, dataset_id: str):
-    """AtomAligned hangzhou/shenzhen: flat image_* + precomputed actions[T,100,D].
+    """AtomAligned hangzhou/shenzhen: flat image_* + precomputed actions[T,H,D].
 
     single right 7D / bimanual 14D; absolute EEF ypr + gripper; prompt + eef_frame.
+    actions[T,H,D] / human 6/12、robot 7/14.
     """
     import tensorflow as tf
 
     n = tf.shape(traj["actions"])[0]
     tf.debugging.assert_equal(tf.shape(traj["state"])[-1], tf.shape(traj["actions"])[-1])
     eef_frame = _episode_scalar_string(
-        traj.get("eef_frame", tf.constant("chunk_start_local")),
+        traj.get("eef_frame", tf.constant("fixed_head_color_optical_camera")),
         field_name="eef_frame",
     )
+    embodiment = "human" if "_human" in dataset_id else "robot"
     return {
         "actions": traj["actions"],
         "state": traj["state"],
@@ -616,7 +720,7 @@ def _aligned_parallel_gripper_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": traj["image_mask_right_wrist"],
         },
         "prompt": traj["prompt"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "eef", eef_frame),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "eef", eef_frame, embodiment=embodiment),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -661,7 +765,7 @@ def _robocoin_restructure(traj, dataset_id: str):
             "right_wrist_0_rgb": right_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -711,7 +815,7 @@ def _robomind_full_restructure(
             "right_wrist_0_rgb": right_mask,
         },
         "prompt": traj["task"],
-        "prompt_prefix": _fill_action_prompt_prefix(n, "joint"),
+        "prompt_prefix": _fill_action_prompt_prefix(n, "joint", embodiment="robot"),
         "dataset_id": tf.fill([n], dataset_id),
     }
 
@@ -872,6 +976,7 @@ class CotrainRldsDataset:
             return frame
 
         def _prepare_standardized(dataset, dataset_cfg: CotrainRLDSDataset):
+            import tensorflow as tf
             # Standardized-style schema (incl. RoboMIND): no DROID-specific success filter /
             # step_id / filter_dict. The restructure maps raw fields -> common nested keys.
             # NOTE: images are left ENCODED here; they are decoded AFTER the shuffle buffer
@@ -879,6 +984,13 @@ class CotrainRldsDataset:
             restructure_fn = STD_RESTRUCTURE_FNS[dataset_cfg.restructure_name]
             if dataset_cfg.restructure_name in _EGO_EVA_GRIPPER_FILTER_NAMES:
                 dataset = dataset.filter(_egoverse_eva_gripper_fields_finite)
+            if dataset_cfg.episode_task_name_regex is not None:
+                _pat = dataset_cfg.episode_task_name_regex
+                dataset = dataset.filter(
+                    lambda traj, p=_pat: tf.strings.regex_full_match(
+                        traj["traj_metadata"]["episode_metadata"]["task_name"][0], p
+                    )
+                )
             if repeat:
                 dataset = dataset.repeat()
             if dataset_cfg.restructure_name == "robomind_full":

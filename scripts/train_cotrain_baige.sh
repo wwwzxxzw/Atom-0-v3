@@ -179,6 +179,18 @@ fi
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
 export JAX_COORDINATOR_ADDRESS="${JAX_COORDINATOR_ADDRESS:-${MASTER_ADDR:-127.0.0.1}:${MASTER_PORT:-29500}}"
 
+# ---- Ablation mixture (read by CotrainDataConfig.create) ----
+# Round1: MIX_MODE=fixed ALIGN_BY_DURATION=1  扫 P_OTHER∈{0.6,0.8,0.9}
+# Round2: ALIGN_BY_DURATION=0  扫 LAB_IN_ALIGN∈{0.1,0.3,0.5}，P_OTHER 用 Round1 选定值
+# Round3: 配比锁死，只改 --model.ot-alpha（或下面 OT_ALPHA）
+export MIX_MODE="${MIX_MODE:-fixed}"
+export P_OTHER="${P_OTHER:-0.8}"
+export LAB_IN_ALIGN="${LAB_IN_ALIGN:-0.3}"
+export O_EV_HUMAN="${O_EV_HUMAN:-0.02}"
+export ALIGN_BY_DURATION="${ALIGN_BY_DURATION:-1}"
+export OT_ALPHA="${OT_ALPHA:-0.7}"
+export OT_ENABLED="${OT_ENABLED:-True}"
+
 args=(
   "${CONFIG_NAME}"
   "--exp-name=${EXP_NAME}"
@@ -188,8 +200,8 @@ args=(
   "--num-train-steps=${NUM_TRAIN_STEPS}"
   "--lr-schedule.warmup-steps=${WARMUP_STEPS}"
   "--lr-schedule.decay-steps=${DECAY_STEPS}"
-  "--lr-schedule.peak-lr=${PEAK_LR:-5e-5}"
-  "--lr-schedule.decay-lr=${DECAY_LR:-5e-6}"
+  "--lr-schedule.peak-lr=${PEAK_LR:-1e-6}"
+  "--lr-schedule.decay-lr=${DECAY_LR:-1e-7}"
   "--eval-interval=${EVAL_INTERVAL}"
   "--save-interval=${SAVE_INTERVAL}"
   "--log-interval=${LOG_INTERVAL}"
@@ -200,6 +212,7 @@ args=(
   "--assets-base-dir=${ASSETS_BASE_DIR}"
   "--checkpoint-base-dir=${CHECKPOINT_BASE_DIR}"
   "--weight-loader.params-path=${PARAMS_PATH}"
+  "--model.ot-alpha=${OT_ALPHA}"
 )
 
 if [[ "${WANDB_ENABLED}" == "1" ]]; then
@@ -207,6 +220,10 @@ if [[ "${WANDB_ENABLED}" == "1" ]]; then
 else
   args+=("--no-wandb-enabled")
 fi
+case "${OT_ENABLED,,}" in
+  0|false|no|off) args+=("--model.no-ot-enabled") ;;
+  *)              args+=("--model.ot-enabled") ;;
+esac
 if [[ "${RUN_ACTION_MSE}" == "1" ]]; then
   args+=("--run-action-mse" "--viz-action-traj")
 else
@@ -220,6 +237,7 @@ mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/baige_${CONFIG_NAME}_${EXP_NAME}_rank${RANK_ID}.log") 2>&1
 
 echo "CONFIG_NAME=${CONFIG_NAME} EXP_NAME=${EXP_NAME} MODE=${MODE}"
+echo "MIX_MODE=${MIX_MODE} P_OTHER=${P_OTHER} LAB_IN_ALIGN=${LAB_IN_ALIGN} O_EV_HUMAN=${O_EV_HUMAN} ALIGN_BY_DURATION=${ALIGN_BY_DURATION}"
 echo "WORLD_SIZE=${WORLD_SIZE:-1} RANK=${RANK_ID} MASTER=${JAX_COORDINATOR_ADDRESS}"
 echo "FSDP_DEVICES=${FSDP_DEVICES} BATCH_SIZE=${BATCH_SIZE} VAL_BATCH_SIZE=${VAL_BATCH_SIZE} NUM_TRAIN_STEPS=${NUM_TRAIN_STEPS}"
 echo "INIT_PARAMS_PATH=${PARAMS_PATH} PARAMS_LAYOUT=${PARAMS_LAYOUT} (model weights only; optimizer/step reset for fresh EXP_NAME)"
